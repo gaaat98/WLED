@@ -121,6 +121,7 @@ void fillUMPins(JsonObject &mods)
 void appendGPIOinfo() {
   char nS[8];
 
+  // add usermod pins as d.um_p array
   oappend(SET_F("d.um_p=[-1")); // has to have 1 element
   if (i2c_sda > -1 && i2c_scl > -1) {
     oappend(","); oappend(itoa(i2c_sda,nS,10));
@@ -140,83 +141,58 @@ void appendGPIOinfo() {
   }
   oappend(SET_F("];"));
 
-  // add reserved and usermod pins as d.um_p array
-  #if defined(CONFIG_IDF_TARGET_ESP32S2)
-  oappend(SET_F("d.rsvd=[22,23,24,25,26,27,28,29,30,31,32"));
-  #elif defined(CONFIG_IDF_TARGET_ESP32S3)
-  oappend(SET_F("d.rsvd=[19,20,22,23,24,25,26,27,28,29,30,31,32"));  // includes 19+20 for USB OTG (JTAG)
-  if (psramFound()) oappend(SET_F(",33,34,35,36,37")); // in use for "octal" PSRAM or "octal" FLASH -seems that octal PSRAM is very common on S3.
-  #elif defined(CONFIG_IDF_TARGET_ESP32C3)
-  oappend(SET_F("d.rsvd=[11,12,13,14,15,16,17"));
-  #elif defined(ESP32)
-  oappend(SET_F("d.rsvd=[6,7,8,9,10,11,24,28,29,30,31,37,38"));
-  if (!pinManager.isPinOk(16,false)) oappend(SET_F(",16")); // covers PICO & WROVER
-  if (!pinManager.isPinOk(17,false)) oappend(SET_F(",17")); // covers PICO & WROVER
-  #else
-  oappend(SET_F("d.rsvd=[6,7,8,9,10,11"));
-  #endif
-
+  // add reserved (unusable) pins
+  oappend(SET_F("d.rsvd=["));
+  for (unsigned i = 0; i < WLED_NUM_PINS; i++) {
+    if (!pinManager.isPinOk(i, false)) {  // include readonly pins
+      oappendi(i); oappend(",");
+    }
+  }
   #ifdef WLED_ENABLE_DMX
-  oappend(SET_F(",2")); // DMX hardcoded pin
+  oappend(SET_F("2,")); // DMX hardcoded pin
   #endif
-
   #if defined(WLED_DEBUG) && !defined(WLED_DEBUG_HOST)
-  oappend(SET_F(",")); oappend(itoa(hardwareTX,nS,10)); // debug output (TX) pin
+  oappend(itoa(hardwareTX,nS,10)); oappend(","); // debug output (TX) pin
   #endif
-
   //Note: Using pin 3 (RX) disables Adalight / Serial JSON
-
   #ifdef WLED_USE_ETHERNET
   if (ethernetType != WLED_ETH_NONE && ethernetType < WLED_NUM_ETH_TYPES) {
-    for (uint8_t p=0; p<WLED_ETH_RSVD_PINS_COUNT; p++) { oappend(","); oappend(itoa(esp32_nonconfigurable_ethernet_pins[p].pin,nS,10)); }
-    if (ethernetBoards[ethernetType].eth_power>=0)     { oappend(","); oappend(itoa(ethernetBoards[ethernetType].eth_power,nS,10)); }
-    if (ethernetBoards[ethernetType].eth_mdc>=0)       { oappend(","); oappend(itoa(ethernetBoards[ethernetType].eth_mdc,nS,10)); }
-    if (ethernetBoards[ethernetType].eth_mdio>=0)      { oappend(","); oappend(itoa(ethernetBoards[ethernetType].eth_mdio,nS,10)); }
-    switch (ethernetBoards[ethernetType].eth_clk_mode) {
+    for (unsigned p=0; p<WLED_ETH_RSVD_PINS_COUNT; p++) { oappend(itoa(esp32_nonconfigurable_ethernet_pins[p].pin,nS,10)); oappend(","); }
+    if (ethernetBoards[ethernetType].eth_power>=0)      { oappend(itoa(ethernetBoards[ethernetType].eth_power,nS,10)); oappend(","); }
+    if (ethernetBoards[ethernetType].eth_mdc>=0)        { oappend(itoa(ethernetBoards[ethernetType].eth_mdc,nS,10)); oappend(","); }
+    if (ethernetBoards[ethernetType].eth_mdio>=0)       { oappend(itoa(ethernetBoards[ethernetType].eth_mdio,nS,10)); oappend(","); }
+    switch (ethernetBoards[ethernetType].eth_clk_mode)  {
       case ETH_CLOCK_GPIO0_IN:
       case ETH_CLOCK_GPIO0_OUT:
-        oappend(SET_F(",0"));
+        oappend(SET_F("0"));
         break;
       case ETH_CLOCK_GPIO16_OUT:
-        oappend(SET_F(",16"));
+        oappend(SET_F("16"));
         break;
       case ETH_CLOCK_GPIO17_OUT:
-        oappend(SET_F(",17"));
+        oappend(SET_F("17"));
         break;
     }
   }
   #endif
-
-  oappend(SET_F("];"));
+  oappend(SET_F("];")); // rsvd
 
   // add info for read-only GPIO
   oappend(SET_F("d.ro_gpio=["));
-  #if defined(CONFIG_IDF_TARGET_ESP32S2)
-  oappendi(46);
-  #elif defined(CONFIG_IDF_TARGET_ESP32S3)
-  // none for S3
-  #elif defined(CONFIG_IDF_TARGET_ESP32C3)
-  // none for C3
-  #elif defined(ESP32)
-  oappend(SET_F("34,35,36,37,38,39"));
-  #else
-  // none for ESP8266
-  #endif
+  bool firstPin = true;
+  for (unsigned i = 0; i < WLED_NUM_PINS; i++) {
+    if (pinManager.isReadOnlyPin(i)) {
+      // No comma before the first pin
+      if (!firstPin) oappend(SET_F(","));
+      oappendi(i);
+      firstPin = false;
+    }
+  }
   oappend(SET_F("];"));
 
   // add info about max. # of pins
   oappend(SET_F("d.max_gpio="));
-  #if defined(CONFIG_IDF_TARGET_ESP32S2)
-  oappendi(46);
-  #elif defined(CONFIG_IDF_TARGET_ESP32S3)
-  oappendi(48);
-  #elif defined(CONFIG_IDF_TARGET_ESP32C3)
-  oappendi(21);
-  #elif defined(ESP32)
-  oappendi(39);
-  #else
-  oappendi(16);
-  #endif
+  oappendi(WLED_NUM_PINS);
   oappend(SET_F(";"));
 }
 
@@ -224,8 +200,7 @@ void appendGPIOinfo() {
 void getSettingsJS(byte subPage, char* dest)
 {
   //0: menu 1: wifi 2: leds 3: ui 4: sync 5: time 6: sec
-  DEBUG_PRINT(F("settings resp"));
-  DEBUG_PRINTLN(subPage);
+  DEBUG_PRINTF_P(PSTR("settings resp %u\n"), (unsigned)subPage);
   obuf = dest;
   olen = 0;
 
@@ -283,6 +258,11 @@ void getSettingsJS(byte subPage, char* dest)
     sappends('s',SET_F("AP"),fapass);
 
     sappend('v',SET_F("AC"),apChannel);
+    #ifdef ARDUINO_ARCH_ESP32
+    sappend('v',SET_F("TX"),txPower);
+    #else
+    oappend(SET_F("gId('tx').style.display='none';"));
+    #endif
     sappend('c',SET_F("FG"),force802_3g);
     sappend('c',SET_F("WS"),noWifiSleep);
 
@@ -298,7 +278,7 @@ void getSettingsJS(byte subPage, char* dest)
     sappend('v',SET_F("ETH"),ethernetType);
     #else
     //hide ethernet setting if not compiled in
-    oappend(SET_F("document.getElementById('ethd').style.display='none';"));
+    oappend(SET_F("gId('ethd').style.display='none';"));
     #endif
 
     if (Network.isConnected()) //is connected
@@ -344,47 +324,53 @@ void getSettingsJS(byte subPage, char* dest)
 
     appendGPIOinfo();
 
+    oappend(SET_F("d.ledTypes=")); oappend(BusManager::getLEDTypesJSONString().c_str()); oappend(";");
+
     // set limits
     oappend(SET_F("bLimits("));
     oappend(itoa(WLED_MAX_BUSSES,nS,10));  oappend(",");
     oappend(itoa(WLED_MIN_VIRTUAL_BUSSES,nS,10));  oappend(",");
     oappend(itoa(MAX_LEDS_PER_BUS,nS,10)); oappend(",");
     oappend(itoa(MAX_LED_MEMORY,nS,10));   oappend(",");
-    oappend(itoa(MAX_LEDS,nS,10));
+    oappend(itoa(MAX_LEDS,nS,10));         oappend(",");
+    oappend(itoa(WLED_MAX_COLOR_ORDER_MAPPINGS,nS,10)); oappend(",");
+    oappend(itoa(WLED_MAX_DIGITAL_CHANNELS,nS,10)); oappend(",");
+    oappend(itoa(WLED_MAX_ANALOG_CHANNELS,nS,10));
     oappend(SET_F(");"));
 
-    sappend('c',SET_F("MS"),autoSegments);
-    sappend('c',SET_F("CCT"),correctWB);
+    sappend('c',SET_F("MS"),strip.autoSegments);
+    sappend('c',SET_F("CCT"),strip.correctWB);
     sappend('c',SET_F("IC"),cctICused);
-    sappend('c',SET_F("CR"),cctFromRgb);
+    sappend('c',SET_F("CR"),strip.cctFromRgb);
     sappend('v',SET_F("CB"),strip.cctBlending);
     sappend('v',SET_F("FR"),strip.getTargetFps());
     sappend('v',SET_F("AW"),Bus::getGlobalAWMode());
     sappend('c',SET_F("LD"),useGlobalLedBuffer);
 
-    uint16_t sumMa = 0;
-    for (uint8_t s=0; s < BusManager::getNumBusses(); s++) {
+    unsigned sumMa = 0;
+    for (int s = 0; s < BusManager::getNumBusses(); s++) {
       Bus* bus = BusManager::getBus(s);
       if (bus == nullptr) continue;
-      char lp[4] = "L0"; lp[2] = 48+s; lp[3] = 0; //ascii 0-9 //strip data pin
-      char lc[4] = "LC"; lc[2] = 48+s; lc[3] = 0; //strip length
-      char co[4] = "CO"; co[2] = 48+s; co[3] = 0; //strip color order
-      char lt[4] = "LT"; lt[2] = 48+s; lt[3] = 0; //strip type
-      char ls[4] = "LS"; ls[2] = 48+s; ls[3] = 0; //strip start LED
-      char cv[4] = "CV"; cv[2] = 48+s; cv[3] = 0; //strip reverse
-      char sl[4] = "SL"; sl[2] = 48+s; sl[3] = 0; //skip 1st LED
-      char rf[4] = "RF"; rf[2] = 48+s; rf[3] = 0; //off refresh
-      char aw[4] = "AW"; aw[2] = 48+s; aw[3] = 0; //auto white mode
-      char wo[4] = "WO"; wo[2] = 48+s; wo[3] = 0; //swap channels
-      char sp[4] = "SP"; sp[2] = 48+s; sp[3] = 0; //bus clock speed
-      char la[4] = "LA"; la[2] = 48+s; la[3] = 0; //LED current
-      char ma[4] = "MA"; ma[2] = 48+s; ma[3] = 0; //max per-port PSU current
+      int offset = s < 10 ? 48 : 55;
+      char lp[4] = "L0"; lp[2] = offset+s; lp[3] = 0; //ascii 0-9 //strip data pin
+      char lc[4] = "LC"; lc[2] = offset+s; lc[3] = 0; //strip length
+      char co[4] = "CO"; co[2] = offset+s; co[3] = 0; //strip color order
+      char lt[4] = "LT"; lt[2] = offset+s; lt[3] = 0; //strip type
+      char ls[4] = "LS"; ls[2] = offset+s; ls[3] = 0; //strip start LED
+      char cv[4] = "CV"; cv[2] = offset+s; cv[3] = 0; //strip reverse
+      char sl[4] = "SL"; sl[2] = offset+s; sl[3] = 0; //skip 1st LED
+      char rf[4] = "RF"; rf[2] = offset+s; rf[3] = 0; //off refresh
+      char aw[4] = "AW"; aw[2] = offset+s; aw[3] = 0; //auto white mode
+      char wo[4] = "WO"; wo[2] = offset+s; wo[3] = 0; //swap channels
+      char sp[4] = "SP"; sp[2] = offset+s; sp[3] = 0; //bus clock speed
+      char la[4] = "LA"; la[2] = offset+s; la[3] = 0; //LED current
+      char ma[4] = "MA"; ma[2] = offset+s; ma[3] = 0; //max per-port PSU current
       oappend(SET_F("addLEDs(1);"));
       uint8_t pins[5];
-      uint8_t nPins = bus->getPins(pins);
-      for (uint8_t i = 0; i < nPins; i++) {
-        lp[1] = 48+i;
-        if (pinManager.isPinOk(pins[i]) || IS_VIRTUAL(bus->getType())) sappend('v',lp,pins[i]);
+      int nPins = bus->getPins(pins);
+      for (int i = 0; i < nPins; i++) {
+        lp[1] = offset+i;
+        if (pinManager.isPinOk(pins[i]) || bus->isVirtual()) sappend('v',lp,pins[i]);
       }
       sappend('v',lc,bus->getLength());
       sappend('v',lt,bus->getType());
@@ -395,8 +381,8 @@ void getSettingsJS(byte subPage, char* dest)
       sappend('c',rf,bus->isOffRefreshRequired());
       sappend('v',aw,bus->getAutoWhiteMode());
       sappend('v',wo,bus->getColorOrder() >> 4);
-      uint16_t speed = bus->getFrequency();
-      if (IS_PWM(bus->getType())) {
+      unsigned speed = bus->getFrequency();
+      if (bus->isPWM()) {
         switch (speed) {
           case WLED_PWM_FREQ/2    : speed = 0; break;
           case WLED_PWM_FREQ*2/3  : speed = 1; break;
@@ -405,7 +391,7 @@ void getSettingsJS(byte subPage, char* dest)
           case WLED_PWM_FREQ*2    : speed = 3; break;
           case WLED_PWM_FREQ*10/3 : speed = 4; break; // uint16_t max (19531 * 3.333)
         }
-      } else if (IS_DIGITAL(bus->getType()) && IS_2PIN(bus->getType())) {
+      } else if (bus->is2Pin()) {
         switch (speed) {
           case  1000 : speed = 0; break;
           case  2000 : speed = 1; break;
@@ -428,7 +414,7 @@ void getSettingsJS(byte subPage, char* dest)
     oappend(itoa(WLED_MAX_COLOR_ORDER_MAPPINGS,nS,10));
     oappend(SET_F(");"));
     const ColorOrderMap& com = BusManager::getColorOrderMap();
-    for (uint8_t s=0; s < com.count(); s++) {
+    for (int s = 0; s < com.count(); s++) {
       const ColorOrderMapEntry* entry = com.get(s);
       if (entry == nullptr) break;
       oappend(SET_F("addCOM("));
@@ -459,7 +445,7 @@ void getSettingsJS(byte subPage, char* dest)
     sappend('v',SET_F("RL"),rlyPin);
     sappend('c',SET_F("RM"),rlyMde);
     sappend('c',SET_F("RO"),rlyOpenDrain);
-    for (uint8_t i=0; i<WLED_MAX_BUTTONS; i++) {
+    for (int i = 0; i < WLED_MAX_BUTTONS; i++) {
       oappend(SET_F("addBtn("));
       oappend(itoa(i,nS,10)); oappend(",");
       oappend(itoa(btnPin[i],nS,10)); oappend(",");
@@ -498,6 +484,7 @@ void getSettingsJS(byte subPage, char* dest)
     sappend('c',SET_F("RB"),receiveNotificationBrightness);
     sappend('c',SET_F("RC"),receiveNotificationColor);
     sappend('c',SET_F("RX"),receiveNotificationEffects);
+    sappend('c',SET_F("RP"),receiveNotificationPalette);
     sappend('c',SET_F("SO"),receiveSegmentOptions);
     sappend('c',SET_F("SG"),receiveSegmentBounds);
     sappend('c',SET_F("SS"),sendNotifications);
@@ -524,15 +511,16 @@ void getSettingsJS(byte subPage, char* dest)
     sappend('c',SET_F("FB"),arlsForceMaxBri);
     sappend('c',SET_F("RG"),arlsDisableGammaCorrection);
     sappend('v',SET_F("WO"),arlsOffset);
+    #ifndef WLED_DISABLE_ALEXA
     sappend('c',SET_F("AL"),alexaEnabled);
     sappends('s',SET_F("AI"),alexaInvocationName);
     sappend('c',SET_F("SA"),notifyAlexa);
     sappend('v',SET_F("AP"),alexaNumPresets);
-    #ifdef WLED_DISABLE_ALEXA
+    #else
     oappend(SET_F("toggle('Alexa');"));  // hide Alexa settings
     #endif
 
-    #ifdef WLED_ENABLE_MQTT
+    #ifndef WLED_DISABLE_MQTT
     sappend('c',SET_F("MQ"),mqttEnabled);
     sappends('s',SET_F("MS"),mqttServer);
     sappend('v',SET_F("MQPORT"),mqttPort);
@@ -583,6 +571,9 @@ void getSettingsJS(byte subPage, char* dest)
     oappend(SET_F("toggle('Hue');"));    // hide Hue Sync settings
     #endif
     sappend('v',SET_F("BD"),serialBaud);
+    #ifndef WLED_ENABLE_ADALIGHT
+    oappend(SET_F("toggle('Serial);"));
+    #endif
   }
 
   if (subPage == SUBPAGE_TIME)
@@ -623,7 +614,7 @@ void getSettingsJS(byte subPage, char* dest)
     sappend('v',SET_F("A1"),macroAlexaOff);
     sappend('v',SET_F("MC"),macroCountdown);
     sappend('v',SET_F("MN"),macroNl);
-    for (uint8_t i=0; i<WLED_MAX_BUTTONS; i++) {
+    for (unsigned i=0; i<WLED_MAX_BUTTONS; i++) {
       oappend(SET_F("addRow("));
       oappend(itoa(i,tm,10));  oappend(",");
       oappend(itoa(macroButton[i],tm,10)); oappend(",");
@@ -724,7 +715,7 @@ void getSettingsJS(byte subPage, char* dest)
     olen -= 2; //delete ";
     oappend(versionString);
     oappend(SET_F("<br>"));
-    oappend((char*)FPSTR(releaseString));
+    oappend(releaseString);
     oappend(SET_F("<br>("));
     #if defined(ARDUINO_ARCH_ESP32)
     oappend(ESP.getChipModel());
@@ -749,7 +740,7 @@ void getSettingsJS(byte subPage, char* dest)
       }
       sappend('v',SET_F("MPC"),strip.panels);
       // panels
-      for (uint8_t i=0; i<strip.panels; i++) {
+      for (unsigned i=0; i<strip.panels; i++) {
         char n[5];
         oappend(SET_F("addPanel("));
         oappend(itoa(i,n,10));
@@ -757,7 +748,7 @@ void getSettingsJS(byte subPage, char* dest)
         char pO[8] = { '\0' };
         snprintf_P(pO, 7, PSTR("P%d"), i);       // MAX_PANELS is 64 so pO will always only be 4 characters or less
         pO[7] = '\0';
-        uint8_t l = strlen(pO);
+        unsigned l = strlen(pO);
         // create P0B, P1B, ..., P63B, etc for other PxxX
         pO[l] = 'B'; sappend('v',pO,strip.panel[i].bottomStart);
         pO[l] = 'R'; sappend('v',pO,strip.panel[i].rightStart);

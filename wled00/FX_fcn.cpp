@@ -43,21 +43,16 @@
   19, 18, 17, 16, 15, 20, 21, 22, 23, 24, 29, 28, 27, 26, 25]}
 */
 
-//factory defaults LED setup
-//#define PIXEL_COUNTS 30, 30, 30, 30
-//#define DATA_PINS 16, 1, 3, 4
-//#define DEFAULT_LED_TYPE TYPE_WS2812_RGB
-
 #ifndef PIXEL_COUNTS
   #define PIXEL_COUNTS DEFAULT_LED_COUNT
 #endif
 
 #ifndef DATA_PINS
-  #define DATA_PINS LEDPIN
+  #define DATA_PINS DEFAULT_LED_PIN
 #endif
 
-#ifndef DEFAULT_LED_TYPE
-  #define DEFAULT_LED_TYPE TYPE_WS2812_RGB
+#ifndef LED_TYPES
+  #define LED_TYPES DEFAULT_LED_TYPE
 #endif
 
 #ifndef DEFAULT_LED_COLOR_ORDER
@@ -69,6 +64,18 @@
   #error "Max segments must be at least max number of busses!"
 #endif
 
+static constexpr unsigned sumPinsRequired(const unsigned* current, size_t count) {
+ return (count > 0) ? (Bus::getNumberOfPins(*current) + sumPinsRequired(current+1,count-1)) : 0;
+}
+
+static constexpr bool validatePinsAndTypes(const unsigned* types, unsigned numTypes, unsigned numPins ) {
+  // Pins provided < pins required -> always invalid
+  // Pins provided = pins required -> always valid
+  // Pins provided > pins required -> valid if excess pins are a product of last type pins since it will be repeated
+  return (sumPinsRequired(types, numTypes) > numPins) ? false :
+          (numPins - sumPinsRequired(types, numTypes)) % Bus::getNumberOfPins(types[numTypes-1]) == 0;
+}
+
 
 ///////////////////////////////////////////////////////////////////////////////
 // Segment class implementation
@@ -77,6 +84,7 @@ uint16_t Segment::_usedSegmentData = 0U; // amount of RAM all segments use for t
 uint16_t Segment::maxWidth = DEFAULT_LED_COUNT;
 uint16_t Segment::maxHeight = 1;
 
+CRGBPalette16 Segment::_currentPalette    = CRGBPalette16(CRGB::Black);
 CRGBPalette16 Segment::_randomPalette     = generateRandomPalette();  // was CRGBPalette16(DEFAULT_COLOR);
 CRGBPalette16 Segment::_newRandomPalette  = generateRandomPalette();  // was CRGBPalette16(DEFAULT_COLOR);
 uint16_t      Segment::_lastPaletteChange = 0; // perhaps it should be per segment
@@ -145,7 +153,7 @@ Segment& Segment::operator= (Segment &&orig) noexcept {
 }
 
 // allocates effect data buffer on heap and initialises (erases) it
-bool IRAM_ATTR Segment::allocateData(size_t len) {
+bool IRAM_ATTR_YN Segment::allocateData(size_t len) {
   if (len == 0) return false; // nothing to do
   if (data && _dataLen >= len) {          // already allocated enough (reduce fragmentation)
     if (call == 0) memset(data, 0, len);  // erase buffer if called during effect initialisation
@@ -169,7 +177,7 @@ bool IRAM_ATTR Segment::allocateData(size_t len) {
   return true;
 }
 
-void IRAM_ATTR Segment::deallocateData() {
+void IRAM_ATTR_YN Segment::deallocateData() {
   if (!data) { _dataLen = 0; return; }
   //DEBUG_PRINTF_P(PSTR("---  Released data (%p): %d/%d -> %p\n"), this, _dataLen, Segment::getUsedSegmentData(), data);
   if ((Segment::getUsedSegmentData() > 0) && (_dataLen > 0)) { // check that we don't have a dangling / inconsistent data pointer
@@ -201,9 +209,9 @@ void Segment::resetIfRequired() {
   reset = false;
 }
 
-CRGBPalette16 IRAM_ATTR &Segment::loadPalette(CRGBPalette16 &targetPalette, uint8_t pal) {
+CRGBPalette16 &Segment::loadPalette(CRGBPalette16 &targetPalette, uint8_t pal) {
   if (pal < 245 && pal > GRADIENT_PALETTE_COUNT+13) pal = 0;
-  if (pal > 245 && (strip.customPalettes.size() == 0 || 255U-pal > strip.customPalettes.size()-1)) pal = 0;
+  if (pal > 245 && (strip.customPalettes.size() == 0 || 255U-pal > strip.customPalettes.size()-1)) pal = 0; // TODO remove strip dependency by moving customPalettes out of strip
   //default palette. Differs depending on effect
   if (pal == 0) switch (mode) {
     case FX_MODE_FIRE_2012  : pal = 35; break; // heat palette
@@ -326,16 +334,11 @@ void Segment::stopTransition() {
   }
 }
 
-void Segment::handleTransition() {
-  unsigned _progress = progress();
-  if (_progress == 0xFFFFU) stopTransition();
-}
-
 // transition progression between 0-65535
-uint16_t IRAM_ATTR Segment::progress() {
+uint16_t IRAM_ATTR Segment::progress() const {
   if (isInTransition()) {
-    unsigned long timeNow = millis();
-    if (_t->_dur > 0 && timeNow - _t->_start < _t->_dur) return (timeNow - _t->_start) * 0xFFFFU / _t->_dur;
+    unsigned diff = millis() - _t->_start;
+    if (_t->_dur > 0 && diff < _t->_dur) return diff * 0xFFFFU / _t->_dur;
   }
   return 0xFFFFU;
 }
@@ -411,7 +414,7 @@ void Segment::restoreSegenv(tmpsegd_t &tmpSeg) {
 }
 #endif
 
-uint8_t IRAM_ATTR Segment::currentBri(bool useCct) {
+uint8_t IRAM_ATTR Segment::currentBri(bool useCct) const {
   unsigned prog = progress();
   if (prog < 0xFFFFU) {
     unsigned curBri = (useCct ? cct : (on ? opacity : 0)) * prog;
@@ -421,7 +424,7 @@ uint8_t IRAM_ATTR Segment::currentBri(bool useCct) {
   return (useCct ? cct : (on ? opacity : 0));
 }
 
-uint8_t IRAM_ATTR Segment::currentMode() {
+uint8_t Segment::currentMode() const {
 #ifndef WLED_DISABLE_MODE_BLEND
   unsigned prog = progress();
   if (modeBlending && prog < 0xFFFFU) return _t->_modeT;
@@ -429,7 +432,7 @@ uint8_t IRAM_ATTR Segment::currentMode() {
   return mode;
 }
 
-uint32_t IRAM_ATTR Segment::currentColor(uint8_t slot) {
+uint32_t IRAM_ATTR_YN Segment::currentColor(uint8_t slot) const {
   if (slot >= NUM_COLORS) slot = 0;
 #ifndef WLED_DISABLE_MODE_BLEND
   return isInTransition() ? color_blend(_t->_segT._colorT[slot], colors[slot], progress(), true) : colors[slot];
@@ -438,18 +441,17 @@ uint32_t IRAM_ATTR Segment::currentColor(uint8_t slot) {
 #endif
 }
 
-CRGBPalette16 IRAM_ATTR &Segment::currentPalette(CRGBPalette16 &targetPalette, uint8_t pal) {
-  loadPalette(targetPalette, pal);
+void Segment::setCurrentPalette() {
+  loadPalette(_currentPalette, palette);
   unsigned prog = progress();
   if (strip.paletteFade && prog < 0xFFFFU) {
     // blend palettes
     // there are about 255 blend passes of 48 "blends" to completely blend two palettes (in _dur time)
     // minimum blend time is 100ms maximum is 65535ms
     unsigned noOfBlends = ((255U * prog) / 0xFFFFU) - _t->_prevPaletteBlends;
-    for (unsigned i=0; i<noOfBlends; i++, _t->_prevPaletteBlends++) nblendPaletteTowardPalette(_t->_palT, targetPalette, 48);
-    targetPalette = _t->_palT; // copy transitioning/temporary palette
+    for (unsigned i = 0; i < noOfBlends; i++, _t->_prevPaletteBlends++) nblendPaletteTowardPalette(_t->_palT, _currentPalette, 48);
+    _currentPalette = _t->_palT; // copy transitioning/temporary palette
   }
-  return targetPalette;
 }
 
 // relies on WS2812FX::service() to call it for each frame
@@ -623,7 +625,7 @@ uint16_t IRAM_ATTR Segment::virtualHeight() const {
   return vHeight;
 }
 
-uint16_t IRAM_ATTR Segment::nrOfVStrips() const {
+uint16_t IRAM_ATTR_YN Segment::nrOfVStrips() const {
   unsigned vLen = 1;
 #ifndef WLED_DISABLE_2D
   if (is2D()) {
@@ -637,20 +639,64 @@ uint16_t IRAM_ATTR Segment::nrOfVStrips() const {
   return vLen;
 }
 
+// Constants for mapping mode "Pinwheel"
+#ifndef WLED_DISABLE_2D
+constexpr int Pinwheel_Steps_Small = 72;       // no holes up to 16x16
+constexpr int Pinwheel_Size_Small  = 16;       // larger than this -> use "Medium"
+constexpr int Pinwheel_Steps_Medium = 192;     // no holes up to 32x32
+constexpr int Pinwheel_Size_Medium  = 32;      // larger than this -> use "Big"
+constexpr int Pinwheel_Steps_Big = 304;        // no holes up to 50x50
+constexpr int Pinwheel_Size_Big  = 50;         // larger than this -> use "XL"
+constexpr int Pinwheel_Steps_XL  = 368;
+constexpr float Int_to_Rad_Small = (DEG_TO_RAD * 360) / Pinwheel_Steps_Small;  // conversion: from 0...72 to Radians
+constexpr float Int_to_Rad_Med =   (DEG_TO_RAD * 360) / Pinwheel_Steps_Medium; // conversion: from 0...192 to Radians
+constexpr float Int_to_Rad_Big =   (DEG_TO_RAD * 360) / Pinwheel_Steps_Big;    // conversion: from 0...304 to Radians
+constexpr float Int_to_Rad_XL =    (DEG_TO_RAD * 360) / Pinwheel_Steps_XL;     // conversion: from 0...368 to Radians
+
+constexpr int Fixed_Scale = 512;               // fixpoint scaling factor (9bit for fraction)
+
+// Pinwheel helper function: pixel index to radians
+static float getPinwheelAngle(int i, int vW, int vH) {
+  int maxXY = max(vW, vH);
+  if (maxXY <= Pinwheel_Size_Small)  return float(i) * Int_to_Rad_Small;
+  if (maxXY <= Pinwheel_Size_Medium) return float(i) * Int_to_Rad_Med;
+  if (maxXY <= Pinwheel_Size_Big)    return float(i) * Int_to_Rad_Big;
+  // else
+  return float(i) * Int_to_Rad_XL;
+}
+// Pinwheel helper function: matrix dimensions to number of rays
+static int getPinwheelLength(int vW, int vH) {
+  int maxXY = max(vW, vH);
+  if (maxXY <= Pinwheel_Size_Small)  return Pinwheel_Steps_Small;
+  if (maxXY <= Pinwheel_Size_Medium) return Pinwheel_Steps_Medium;
+  if (maxXY <= Pinwheel_Size_Big)    return Pinwheel_Steps_Big;
+  // else
+  return Pinwheel_Steps_XL;
+}
+#endif
+
 // 1D strip
 uint16_t IRAM_ATTR Segment::virtualLength() const {
 #ifndef WLED_DISABLE_2D
   if (is2D()) {
     unsigned vW = virtualWidth();
     unsigned vH = virtualHeight();
-    unsigned vLen = vW * vH; // use all pixels from segment
+    unsigned vLen;
     switch (map1D2D) {
       case M12_pBar:
         vLen = vH;
         break;
       case M12_pCorner:
-      case M12_pArc:
         vLen = max(vW,vH); // get the longest dimension
+        break;
+      case M12_pArc:
+        vLen = sqrt16(vH*vH + vW*vW); // use diagonal
+        break;
+      case M12_sPinwheel:
+        vLen = getPinwheelLength(vW, vH);
+        break;
+      default:
+        vLen = vW * vH; // use all pixels from segment
         break;
     }
     return vLen;
@@ -662,7 +708,7 @@ uint16_t IRAM_ATTR Segment::virtualLength() const {
   return vLength;
 }
 
-void IRAM_ATTR Segment::setPixelColor(int i, uint32_t col)
+void IRAM_ATTR_YN Segment::setPixelColor(int i, uint32_t col)
 {
   if (!isActive()) return; // not active
 #ifndef WLED_DISABLE_2D
@@ -691,12 +737,14 @@ void IRAM_ATTR Segment::setPixelColor(int i, uint32_t col)
         if (i==0)
           setPixelColorXY(0, 0, col);
         else {
-          float step = HALF_PI / (2.85f*i);
-          for (float rad = 0.0f; rad <= HALF_PI+step/2; rad += step) {
-            // may want to try float version as well (with or without antialiasing)
-            int x = roundf(sin_t(rad) * i);
-            int y = roundf(cos_t(rad) * i);
+          float r = i;
+          float step = HALF_PI / (2.8284f * r + 4); // we only need (PI/4)/(r/sqrt(2)+1) steps
+          for (float rad = 0.0f; rad <= (HALF_PI/2)+step/2; rad += step) {
+            int x = roundf(sin_t(rad) * r);
+            int y = roundf(cos_t(rad) * r);
+            // exploit symmetry
             setPixelColorXY(x, y, col);
+            setPixelColorXY(y, x, col);
           }
           // Bresenham’s Algorithm (may not fill every pixel)
           //int d = 3 - (2*i);
@@ -718,6 +766,52 @@ void IRAM_ATTR Segment::setPixelColor(int i, uint32_t col)
         for (int x = 0; x <= i; x++) setPixelColorXY(x, i, col);
         for (int y = 0; y <  i; y++) setPixelColorXY(i, y, col);
         break;
+      case M12_sPinwheel: {
+        // i = angle --> 0 - 296  (Big), 0 - 192  (Medium), 0 - 72 (Small)
+        float centerX = roundf((vW-1) / 2.0f);
+        float centerY = roundf((vH-1) / 2.0f);
+        float angleRad = getPinwheelAngle(i, vW, vH); // angle in radians
+        float cosVal = cos_t(angleRad);
+        float sinVal = sin_t(angleRad);
+
+        // avoid re-painting the same pixel
+        int lastX = INT_MIN; // impossible position
+        int lastY = INT_MIN; // impossible position
+        // draw line at angle, starting at center and ending at the segment edge
+        // we use fixed point math for better speed. Starting distance is 0.5 for better rounding
+        // int_fast16_t and int_fast32_t types changed to int, minimum bits commented
+        int posx = (centerX + 0.5f * cosVal) * Fixed_Scale; // X starting position in fixed point 18 bit
+        int posy = (centerY + 0.5f * sinVal) * Fixed_Scale; // Y starting position in fixed point 18 bit
+        int inc_x = cosVal * Fixed_Scale; // X increment per step (fixed point) 10 bit
+        int inc_y = sinVal * Fixed_Scale; // Y increment per step (fixed point) 10 bit
+
+        int32_t maxX = vW * Fixed_Scale; // X edge in fixedpoint
+        int32_t maxY = vH * Fixed_Scale; // Y edge in fixedpoint
+
+        // Odd rays start further from center if prevRay started at center.
+        static int prevRay = INT_MIN; // previous ray number
+        if ((i % 2 == 1) && (i - 1 == prevRay || i + 1 == prevRay)) {
+          int jump = min(vW/3, vH/3); // can add 2 if using medium pinwheel 
+          posx += inc_x * jump;
+          posy += inc_y * jump;
+        }
+        prevRay = i;
+
+        // draw ray until we hit any edge
+        while ((posx >= 0) && (posy >= 0) && (posx < maxX)  && (posy < maxY))  {
+          // scale down to integer (compiler will replace division with appropriate bitshift)
+          int x = posx / Fixed_Scale;
+          int y = posy / Fixed_Scale;
+          // set pixel
+          if (x != lastX || y != lastY) setPixelColorXY(x, y, col);  // only paint if pixel position is different
+          lastX = x;
+          lastY = y;
+          // advance to next position
+          posx += inc_x;
+          posy += inc_y;
+        }
+        break;
+      }
     }
     return;
   } else if (Segment::maxHeight!=1 && (width()==1 || height()==1)) {
@@ -808,7 +902,7 @@ void Segment::setPixelColor(float i, uint32_t col, bool aa)
 }
 #endif
 
-uint32_t IRAM_ATTR Segment::getPixelColor(int i)
+uint32_t IRAM_ATTR_YN Segment::getPixelColor(int i) const
 {
   if (!isActive()) return 0; // not active
 #ifndef WLED_DISABLE_2D
@@ -818,8 +912,8 @@ uint32_t IRAM_ATTR Segment::getPixelColor(int i)
 
 #ifndef WLED_DISABLE_2D
   if (is2D()) {
-    unsigned vH = virtualHeight();  // segment height in logical pixels
-    unsigned vW = virtualWidth();
+    int vH = virtualHeight();  // segment height in logical pixels
+    int vW = virtualWidth();
     switch (map1D2D) {
       case M12_Pixels:
         return getPixelColorXY(i % vW, i / vW);
@@ -829,11 +923,44 @@ uint32_t IRAM_ATTR Segment::getPixelColor(int i)
         else          return getPixelColorXY(0, vH - i -1);
         break;
       case M12_pArc:
+        if (i >= vW && i >= vH) {
+          unsigned vI = sqrt16(i*i/2);
+          return getPixelColorXY(vI,vI); // use diagonal
+        }
       case M12_pCorner:
         // use longest dimension
         return vW>vH ? getPixelColorXY(i, 0) : getPixelColorXY(0, i);
         break;
-    }
+      case M12_sPinwheel:
+        // not 100% accurate, returns pixel at outer edge
+        // i = angle --> 0 - 296  (Big), 0 - 192  (Medium), 0 - 72 (Small)
+        float centerX = roundf((vW-1) / 2.0f);
+        float centerY = roundf((vH-1) / 2.0f);
+        float angleRad = getPinwheelAngle(i, vW, vH); // angle in radians
+        float cosVal = cos_t(angleRad);
+        float sinVal = sin_t(angleRad);
+
+        int posx = (centerX + 0.5f * cosVal) * Fixed_Scale; // X starting position in fixed point 18 bit
+        int posy = (centerY + 0.5f * sinVal) * Fixed_Scale; // Y starting position in fixed point 18 bit
+        int inc_x = cosVal * Fixed_Scale; // X increment per step (fixed point) 10 bit
+        int inc_y = sinVal * Fixed_Scale; // Y increment per step (fixed point) 10 bit
+        int32_t maxX = vW * Fixed_Scale; // X edge in fixedpoint
+        int32_t maxY = vH * Fixed_Scale; // Y edge in fixedpoint
+
+        // trace ray from center until we hit any edge - to avoid rounding problems, we use the same method as in setPixelColor
+        int x = INT_MIN;
+        int y = INT_MIN;
+        while ((posx >= 0) && (posy >= 0) && (posx < maxX)  && (posy < maxY))  {
+          // scale down to integer (compiler will replace division with appropriate bitshift)
+          x = posx / Fixed_Scale;
+          y = posy / Fixed_Scale;
+          // advance to next position
+          posx += inc_x;
+          posy += inc_y;
+        }
+        return getPixelColorXY(x, y);
+        break;
+      }
     return 0;
   }
 #endif
@@ -841,9 +968,9 @@ uint32_t IRAM_ATTR Segment::getPixelColor(int i)
   if (reverse) i = virtualLength() - i - 1;
   i *= groupLength();
   i += start;
-  /* offset/phase */
+  // offset/phase
   i += offset;
-  if ((i >= stop) && (stop>0)) i -= length(); // avoids negative pixel index (stop = 0 is a possible value)
+  if (i >= stop) i -= length();
   return strip.getPixelColor(i);
 }
 
@@ -908,9 +1035,9 @@ void Segment::refreshLightCapabilities() {
     if (bus->getStart() + bus->getLength() <= segStartIdx) continue;
 
     //uint8_t type = bus->getType();
-    if (bus->hasRGB() || (cctFromRgb && bus->hasCCT())) capabilities |= SEG_CAPABILITY_RGB;
-    if (!cctFromRgb && bus->hasCCT())                   capabilities |= SEG_CAPABILITY_CCT;
-    if (correctWB && (bus->hasRGB() || bus->hasCCT()))  capabilities |= SEG_CAPABILITY_CCT; //white balance correction (CCT slider)
+    if (bus->hasRGB() || (strip.cctFromRgb && bus->hasCCT())) capabilities |= SEG_CAPABILITY_RGB;
+    if (!strip.cctFromRgb && bus->hasCCT())                   capabilities |= SEG_CAPABILITY_CCT;
+    if (strip.correctWB && (bus->hasRGB() || bus->hasCCT()))  capabilities |= SEG_CAPABILITY_CCT; //white balance correction (CCT slider)
     if (bus->hasWhite()) {
       unsigned aWM = Bus::getGlobalAWMode() == AW_GLOBAL_DISABLED ? bus->getAutoWhiteMode() : Bus::getGlobalAWMode();
       bool whiteSlider = (aWM == RGBW_MODE_DUAL || aWM == RGBW_MODE_MANUAL_ONLY); // white slider allowed
@@ -945,7 +1072,7 @@ void Segment::fade_out(uint8_t rate) {
   const int rows = virtualHeight(); // will be 1 for 1D
 
   rate = (255-rate) >> 1;
-  float mappedRate = float(rate) +1.1f;
+  float mappedRate = 1.0f / (float(rate) + 1.1f);
 
   uint32_t color = colors[1]; // SEGCOLOR(1); // target color
   int w2 = W(color);
@@ -955,15 +1082,16 @@ void Segment::fade_out(uint8_t rate) {
 
   for (int y = 0; y < rows; y++) for (int x = 0; x < cols; x++) {
     color = is2D() ? getPixelColorXY(x, y) : getPixelColor(x);
+    if (color == colors[1]) continue; // already at target color
     int w1 = W(color);
     int r1 = R(color);
     int g1 = G(color);
     int b1 = B(color);
 
-    int wdelta = (w2 - w1) / mappedRate;
-    int rdelta = (r2 - r1) / mappedRate;
-    int gdelta = (g2 - g1) / mappedRate;
-    int bdelta = (b2 - b1) / mappedRate;
+    int wdelta = (w2 - w1) * mappedRate;
+    int rdelta = (r2 - r1) * mappedRate;
+    int gdelta = (g2 - g1) * mappedRate;
+    int bdelta = (b2 - b1) * mappedRate;
 
     // if fade isn't complete, make sure delta is at least 1 (fixes rounding issues)
     wdelta += (w2 == w1) ? 0 : (w2 > w1) ? 1 : -1;
@@ -996,15 +1124,13 @@ void Segment::blur(uint8_t blur_amount, bool smear) {
 #ifndef WLED_DISABLE_2D
   if (is2D()) {
     // compatibility with 2D
-    const unsigned cols = virtualWidth();
-    const unsigned rows = virtualHeight();
-    for (unsigned i = 0; i < rows; i++) blurRow(i, blur_amount, smear); // blur all rows
-    for (unsigned k = 0; k < cols; k++) blurCol(k, blur_amount, smear); // blur all columns
+    blur2D(blur_amount, smear);
+    //box_blur(map(blur_amount,1,255,1,3), smear);
     return;
   }
 #endif
   uint8_t keep = smear ? 255 : 255 - blur_amount;
-  uint8_t seep = blur_amount >> 1;
+  uint8_t seep = blur_amount >> (1 + smear);
   unsigned vlength = virtualLength();
   uint32_t carryover = BLACK;
   uint32_t lastnew;
@@ -1015,13 +1141,11 @@ void Segment::blur(uint8_t blur_amount, bool smear) {
     uint32_t part = color_fade(cur, seep);
     curnew = color_fade(cur, keep);
     if (i > 0) {
-      if (carryover)
-        curnew = color_add(curnew, carryover, true);
+      if (carryover) curnew = color_add(curnew, carryover, true);
       uint32_t prev = color_add(lastnew, part, true);
-      if (last != prev) // optimization: only set pixel if color has changed
-        setPixelColor(i - 1, prev);
-    }
-    else // first pixel
+      // optimization: only set pixel if color has changed
+      if (last != prev) setPixelColor(i - 1, prev);
+    } else // first pixel
       setPixelColor(i, curnew);
     lastnew = curnew;
     last = cur; // save original value for comparison on next iteration
@@ -1035,7 +1159,7 @@ void Segment::blur(uint8_t blur_amount, bool smear) {
  * The colours are a transition r -> g -> b -> back to r
  * Inspired by the Adafruit examples.
  */
-uint32_t Segment::color_wheel(uint8_t pos) {
+uint32_t Segment::color_wheel(uint8_t pos) const {
   if (palette) return color_from_palette(pos, false, true, 0); // perhaps "strip.paletteBlend < 2" should be better instead of "true"
   uint8_t w = W(currentColor(0));
   pos = 255 - pos;
@@ -1059,7 +1183,7 @@ uint32_t Segment::color_wheel(uint8_t pos) {
  * @param pbri Value to scale the brightness of the returned color by. Default is 255. (no scaling)
  * @returns Single color from palette
  */
-uint32_t Segment::color_from_palette(uint16_t i, bool mapping, bool wrap, uint8_t mcol, uint8_t pbri) {
+uint32_t Segment::color_from_palette(uint16_t i, bool mapping, bool wrap, uint8_t mcol, uint8_t pbri) const {
   uint32_t color = gamma32(currentColor(mcol));
 
   // default palette or no RGB support on segment
@@ -1069,9 +1193,7 @@ uint32_t Segment::color_from_palette(uint16_t i, bool mapping, bool wrap, uint8_
   if (mapping && virtualLength() > 1) paletteIndex = (i*255)/(virtualLength() -1);
   // paletteBlend: 0 - wrap when moving, 1 - always wrap, 2 - never wrap, 3 - none (undefined)
   if (!wrap && strip.paletteBlend != 3) paletteIndex = scale8(paletteIndex, 240); //cut off blend at palette "end"
-  CRGBPalette16 curPal;
-  curPal = currentPalette(curPal, palette);
-  CRGB fastled_col = ColorFromPalette(curPal, paletteIndex, pbri, (strip.paletteBlend == 3)? NOBLEND:LINEARBLEND); // NOTE: paletteBlend should be global
+  CRGB fastled_col = ColorFromPalette(_currentPalette, paletteIndex, pbri, (strip.paletteBlend == 3)? NOBLEND:LINEARBLEND); // NOTE: paletteBlend should be global
 
   return RGBW32(fastled_col.r, fastled_col.g, fastled_col.b, W(color));
 }
@@ -1082,7 +1204,7 @@ uint32_t Segment::color_from_palette(uint16_t i, bool mapping, bool wrap, uint8_
 ///////////////////////////////////////////////////////////////////////////////
 
 //do not call this method from system context (network callback)
-void WS2812FX::finalizeInit(void) {
+void WS2812FX::finalizeInit() {
   //reset segment runtimes
   for (segment &seg : _segments) {
     seg.markForReset();
@@ -1092,6 +1214,7 @@ void WS2812FX::finalizeInit(void) {
   // for the lack of better place enumerate ledmaps here
   // if we do it in json.cpp (serializeInfo()) we are getting flashes on LEDs
   // unfortunately this means we do not get updates after uploads
+  // the other option is saving UI settings which will cause enumeration
   enumerateLedmaps();
 
   _hasWhiteChannel = _isOffRefreshRequired = false;
@@ -1099,26 +1222,82 @@ void WS2812FX::finalizeInit(void) {
   //if busses failed to load, add default (fresh install, FS issue, ...)
   if (BusManager::getNumBusses() == 0) {
     DEBUG_PRINTLN(F("No busses, init default"));
-    const unsigned defDataPins[] = {DATA_PINS};
-    const unsigned defCounts[] = {PIXEL_COUNTS};
-    const unsigned defNumPins = ((sizeof defDataPins) / (sizeof defDataPins[0]));
-    const unsigned defNumCounts = ((sizeof defCounts)   / (sizeof defCounts[0]));
-    const unsigned defNumBusses = defNumPins > defNumCounts && defNumCounts > 1 && defNumPins%defNumCounts == 0 ? defNumCounts : defNumPins;
-    const unsigned pinsPerBus = defNumPins / defNumBusses;
+    constexpr unsigned defDataTypes[] = {LED_TYPES};
+    constexpr unsigned defDataPins[] = {DATA_PINS};
+    constexpr unsigned defCounts[] = {PIXEL_COUNTS};
+    constexpr unsigned defNumTypes = ((sizeof defDataTypes) / (sizeof defDataTypes[0]));
+    constexpr unsigned defNumPins = ((sizeof defDataPins) / (sizeof defDataPins[0]));
+    constexpr unsigned defNumCounts = ((sizeof defCounts) / (sizeof defCounts[0]));
+
+    static_assert(validatePinsAndTypes(defDataTypes, defNumTypes, defNumPins),
+                  "The default pin list defined in DATA_PINS does not match the pin requirements for the default buses defined in LED_TYPES");
+    
     unsigned prevLen = 0;
-    for (unsigned i = 0; i < defNumBusses && i < WLED_MAX_BUSSES+WLED_MIN_VIRTUAL_BUSSES; i++) {
-      uint8_t defPin[5]; // max 5 pins
-      for (unsigned j = 0; j < pinsPerBus; j++) defPin[j] = defDataPins[i*pinsPerBus + j];
-      // when booting without config (1st boot) we need to make sure GPIOs defined for LED output don't clash with hardware
-      // i.e. DEBUG (GPIO1), DMX (2), SPI RAM/FLASH (16&17 on ESP32-WROVER/PICO), etc
-      if (pinManager.isPinAllocated(defPin[0])) {
-        defPin[0] = 1; // start with GPIO1 and work upwards
-        while (pinManager.isPinAllocated(defPin[0]) && defPin[0] < WLED_NUM_PINS) defPin[0]++;
+    unsigned pinsIndex = 0;
+    for (unsigned i = 0; i < WLED_MAX_BUSSES+WLED_MIN_VIRTUAL_BUSSES; i++) {
+      uint8_t defPin[OUTPUT_MAX_PINS];
+      // if we have less types than requested outputs and they do not align, use last known type to set current type
+      unsigned dataType = defDataTypes[(i < defNumTypes) ? i : defNumTypes -1];
+      unsigned busPins = Bus::getNumberOfPins(dataType);
+
+      // if we need more pins than available all outputs have been configured
+      if (pinsIndex + busPins > defNumPins) break;
+      
+      // Assign all pins first so we can check for conflicts on this bus
+      for (unsigned j = 0; j < busPins && j < OUTPUT_MAX_PINS; j++) defPin[j] = defDataPins[pinsIndex + j];
+
+      for (unsigned j = 0; j < busPins && j < OUTPUT_MAX_PINS; j++) {
+        bool validPin = true;
+        // When booting without config (1st boot) we need to make sure GPIOs defined for LED output don't clash with hardware
+        // i.e. DEBUG (GPIO1), DMX (2), SPI RAM/FLASH (16&17 on ESP32-WROVER/PICO), read/only pins, etc.
+        // Pin should not be already allocated, read/only or defined for current bus
+        while (pinManager.isPinAllocated(defPin[j]) || !pinManager.isPinOk(defPin[j],true)) {
+          if (validPin) {
+            DEBUG_PRINTLN(F("Some of the provided pins cannot be used to configure this LED output."));
+            defPin[j] = 1; // start with GPIO1 and work upwards
+            validPin = false;
+          } else if (defPin[j] < WLED_NUM_PINS) {
+            defPin[j]++;
+          } else {
+            DEBUG_PRINTLN(F("No available pins left! Can't configure output."));
+            return;
+          }
+          // is the newly assigned pin already defined or used previously?
+          // try next in line until there are no clashes or we run out of pins
+          bool clash;
+          do {
+            clash = false;
+            // check for conflicts on current bus
+            for (const auto &pin : defPin) {
+              if (&pin != &defPin[j] && pin == defPin[j]) {
+                clash = true;
+                break;
+              }
+            }
+            // We already have a clash on current bus, no point checking next buses
+            if (!clash) {
+              // check for conflicts in defined pins
+              for (const auto &pin : defDataPins) {
+                if (pin == defPin[j]) {
+                  clash = true;
+                  break;
+                }
+              }
+            }
+            if (clash) defPin[j]++;
+            if (defPin[j] >= WLED_NUM_PINS) break;
+          } while (clash);
+        }
       }
+      pinsIndex += busPins;
+
       unsigned start = prevLen;
+      // if we have less counts than pins and they do not align, use last known count to set current count
       unsigned count = defCounts[(i < defNumCounts) ? i : defNumCounts -1];
+      // analog always has length 1
+      if (Bus::isPWM(dataType)) count = 1;
       prevLen += count;
-      BusConfig defCfg = BusConfig(DEFAULT_LED_TYPE, defPin, start, count, DEFAULT_LED_COLOR_ORDER, false, 0, RGBW_MODE_MANUAL_ONLY);
+      BusConfig defCfg = BusConfig(dataType, defPin, start, count, DEFAULT_LED_COLOR_ORDER, false, 0, RGBW_MODE_MANUAL_ONLY, 0, useGlobalLedBuffer);
       if (BusManager::add(defCfg) == -1) break;
     }
   }
@@ -1131,15 +1310,16 @@ void WS2812FX::finalizeInit(void) {
     //RGBW mode is enabled if at least one of the strips is RGBW
     _hasWhiteChannel |= bus->hasWhite();
     //refresh is required to remain off if at least one of the strips requires the refresh.
-    _isOffRefreshRequired |= bus->isOffRefreshRequired();
+    _isOffRefreshRequired |= bus->isOffRefreshRequired() && !bus->isPWM(); // use refresh bit for phase shift with analog
     unsigned busEnd = bus->getStart() + bus->getLength();
     if (busEnd > _length) _length = busEnd;
     #ifdef ESP8266
-    if ((!IS_DIGITAL(bus->getType()) || IS_2PIN(bus->getType()))) continue;
-    uint8_t pins[5];
-    if (!bus->getPins(pins)) continue;
-    BusDigital* bd = static_cast<BusDigital*>(bus);
-    if (pins[0] == 3) bd->reinit();
+    // why do we need to reinitialise GPIO3???
+    //if (!bus->isDigital() || bus->is2Pin()) continue;
+    //uint8_t pins[5];
+    //if (!bus->getPins(pins)) continue;
+    //BusDigital* bd = static_cast<BusDigital*>(bus);
+    //if (pins[0] == 3) bd->reinit();
     #endif
   }
 
@@ -1184,7 +1364,7 @@ void WS2812FX::service() {
         _colors_t[0] = gamma32(seg.currentColor(0));
         _colors_t[1] = gamma32(seg.currentColor(1));
         _colors_t[2] = gamma32(seg.currentColor(2));
-        seg.currentPalette(_currentPalette, seg.palette); // we need to pass reference
+        seg.setCurrentPalette();              // load actual palette
         // when correctWB is true we need to correct/adjust RGB value according to desired CCT value, but it will also affect actual WW/CW ratio
         // when cctFromRgb is true we implicitly calculate WW and CW from RGB values
         if (cctFromRgb) BusManager::setSegmentCCT(-1);
@@ -1227,7 +1407,7 @@ void WS2812FX::service() {
   #endif
   if (doShow) {
     yield();
-    Segment::handleRandomPalette(); // slowly transtion random palette; move it into for loop when each segment has individual random palette
+    Segment::handleRandomPalette(); // slowly transition random palette; move it into for loop when each segment has individual random palette
     show();
   }
   #ifdef WLED_DEBUG
@@ -1241,13 +1421,13 @@ void IRAM_ATTR WS2812FX::setPixelColor(unsigned i, uint32_t col) {
   BusManager::setPixelColor(i, col);
 }
 
-uint32_t IRAM_ATTR WS2812FX::getPixelColor(uint16_t i) {
+uint32_t IRAM_ATTR WS2812FX::getPixelColor(uint16_t i) const {
   i = getMappedPixelIndex(i);
   if (i >= _length) return 0;
   return BusManager::getPixelColor(i);
 }
 
-void WS2812FX::show(void) {
+void WS2812FX::show() {
   // avoid race condition, capture _callback value
   show_callback callback = _callback;
   if (callback) callback();
@@ -1269,7 +1449,7 @@ void WS2812FX::show(void) {
  * Returns a true value if any of the strips are still being updated.
  * On some hardware (ESP32), strip updates are done asynchronously.
  */
-bool WS2812FX::isUpdating() {
+bool WS2812FX::isUpdating() const {
   return !BusManager::canAllShow();
 }
 
@@ -1277,7 +1457,7 @@ bool WS2812FX::isUpdating() {
  * Returns the refresh rate of the LED strip. Useful for finding out whether a given setup is fast enough.
  * Only updates on show() or is set to 0 fps if last show is more than 2 secs ago, so accuracy varies
  */
-uint16_t WS2812FX::getFps() {
+uint16_t WS2812FX::getFps() const {
   if (millis() - _lastShow > 2000) return 0;
   return _cumulativeFps +1;
 }
@@ -1336,17 +1516,17 @@ void WS2812FX::setBrightness(uint8_t b, bool direct) {
   }
 }
 
-uint8_t WS2812FX::getActiveSegsLightCapabilities(bool selectedOnly) {
+uint8_t WS2812FX::getActiveSegsLightCapabilities(bool selectedOnly) const {
   uint8_t totalLC = 0;
-  for (segment &seg : _segments) {
+  for (const segment &seg : _segments) {
     if (seg.isActive() && (!selectedOnly || seg.isSelected())) totalLC |= seg.getLightCapabilities();
   }
   return totalLC;
 }
 
-uint8_t WS2812FX::getFirstSelectedSegId(void) {
+uint8_t WS2812FX::getFirstSelectedSegId() const {
   size_t i = 0;
-  for (segment &seg : _segments) {
+  for (const segment &seg : _segments) {
     if (seg.isActive() && seg.isSelected()) return i;
     i++;
   }
@@ -1362,14 +1542,14 @@ void WS2812FX::setMainSegmentId(uint8_t n) {
   return;
 }
 
-uint8_t WS2812FX::getLastActiveSegmentId(void) {
+uint8_t WS2812FX::getLastActiveSegmentId() const {
   for (size_t i = _segments.size() -1; i > 0; i--) {
     if (_segments[i].isActive()) return i;
   }
   return 0;
 }
 
-uint8_t WS2812FX::getActiveSegmentsNum(void) {
+uint8_t WS2812FX::getActiveSegmentsNum() const {
   uint8_t c = 0;
   for (size_t i = 0; i < _segments.size(); i++) {
     if (_segments[i].isActive()) c++;
@@ -1377,13 +1557,13 @@ uint8_t WS2812FX::getActiveSegmentsNum(void) {
   return c;
 }
 
-uint16_t WS2812FX::getLengthTotal(void) {
+uint16_t WS2812FX::getLengthTotal() const {
   unsigned len = Segment::maxWidth * Segment::maxHeight; // will be _length for 1D (see finalizeInit()) but should cover whole matrix for 2D
   if (isMatrix && _length > len) len = _length; // for 2D with trailing strip
   return len;
 }
 
-uint16_t WS2812FX::getLengthPhysical(void) {
+uint16_t WS2812FX::getLengthPhysical() const {
   unsigned len = 0;
   for (size_t b = 0; b < BusManager::getNumBusses(); b++) {
     Bus *bus = BusManager::getBus(b);
@@ -1396,7 +1576,7 @@ uint16_t WS2812FX::getLengthPhysical(void) {
 //used for JSON API info.leds.rgbw. Little practical use, deprecate with info.leds.rgbw.
 //returns if there is an RGBW bus (supports RGB and White, not only white)
 //not influenced by auto-white mode, also true if white slider does not affect output white channel
-bool WS2812FX::hasRGBWBus(void) {
+bool WS2812FX::hasRGBWBus() const {
   for (size_t b = 0; b < BusManager::getNumBusses(); b++) {
     Bus *bus = BusManager::getBus(b);
     if (bus == nullptr || bus->getLength()==0) break;
@@ -1405,7 +1585,7 @@ bool WS2812FX::hasRGBWBus(void) {
   return false;
 }
 
-bool WS2812FX::hasCCTBus(void) {
+bool WS2812FX::hasCCTBus() const {
   if (cctFromRgb && !correctWB) return false;
   for (size_t b = 0; b < BusManager::getNumBusses(); b++) {
     Bus *bus = BusManager::getBus(b);
@@ -1481,7 +1661,7 @@ void WS2812FX::makeAutoSegments(bool forceReset) {
       segStops[s]  = segStarts[s] + b->getLength();
 
       #ifndef WLED_DISABLE_2D
-      if (isMatrix && segStops[s] < Segment::maxWidth*Segment::maxHeight) continue; // ignore buses comprising matrix
+      if (isMatrix && segStops[s] <= Segment::maxWidth*Segment::maxHeight) continue; // ignore buses comprising matrix
       if (isMatrix && segStarts[s] < Segment::maxWidth*Segment::maxHeight) segStarts[s] = Segment::maxWidth*Segment::maxHeight;
       #endif
 
@@ -1509,6 +1689,7 @@ void WS2812FX::makeAutoSegments(bool forceReset) {
     for (size_t i = 1; i < s; i++) {
       _segments.push_back(Segment(segStarts[i], segStops[i]));
     }
+    DEBUG_PRINTF_P(PSTR("%d auto segments created.\n"), _segments.size());
 
   } else {
 
@@ -1554,6 +1735,8 @@ void WS2812FX::fixInvalidSegments() {
       if (_segments[i].stop  >  _length) _segments[i].stop = _length;
     }
   }
+  // if any segments were deleted free memory
+  purgeSegments();
   // this is always called as the last step after finalizeInit(), update covered bus types
   for (segment &seg : _segments)
     seg.refreshLightCapabilities();
@@ -1584,12 +1767,11 @@ void WS2812FX::setRange(uint16_t i, uint16_t i2, uint32_t col) {
 void WS2812FX::printSize() {
   size_t size = 0;
   for (const Segment &seg : _segments) size += seg.getSize();
-  DEBUG_PRINTF_P(PSTR("Segments: %d -> %uB\n"), _segments.size(), size);
+  DEBUG_PRINTF_P(PSTR("Segments: %d -> %u/%dB\n"), _segments.size(), size, Segment::getUsedSegmentData());
+  for (const Segment &seg : _segments) DEBUG_PRINTF_P(PSTR("  Seg: %d,%d [A=%d, 2D=%d, RGB=%d, W=%d, CCT=%d]\n"), seg.width(), seg.height(), seg.isActive(), seg.is2D(), seg.hasRGB(), seg.hasWhite(), seg.isCCT());
   DEBUG_PRINTF_P(PSTR("Modes: %d*%d=%uB\n"), sizeof(mode_ptr), _mode.size(), (_mode.capacity()*sizeof(mode_ptr)));
   DEBUG_PRINTF_P(PSTR("Data: %d*%d=%uB\n"), sizeof(const char *), _modeData.size(), (_modeData.capacity()*sizeof(const char *)));
   DEBUG_PRINTF_P(PSTR("Map: %d*%d=%uB\n"), sizeof(uint16_t), (int)customMappingSize, customMappingSize*sizeof(uint16_t));
-  size = getLengthTotal();
-  if (useGlobalLedBuffer) DEBUG_PRINTF_P(PSTR("Buffer: %d*%u=%uB\n"), sizeof(CRGB), size, size*sizeof(CRGB));
 }
 #endif
 
@@ -1653,13 +1835,15 @@ bool WS2812FX::deserializeMap(uint8_t n) {
   bool isFile = WLED_FS.exists(fileName);
 
   customMappingSize = 0; // prevent use of mapping if anything goes wrong
+  currentLedmap = 0;
+  if (n == 0 || isFile) interfaceUpdateCallMode = CALL_MODE_WS_SEND; // schedule WS update (to inform UI)
 
   if (!isFile && n==0 && isMatrix) {
     setUpMatrix();
     return false;
   }
 
-  if (!isFile || !requestJSONBufferLock(7)) return false; // this will trigger setUpMatrix() when called from wled.cpp
+  if (!isFile || !requestJSONBufferLock(7)) return false;
 
   if (!readObjectFromFile(fileName, nullptr, pDoc)) {
     DEBUG_PRINT(F("ERROR Invalid ledmap in ")); DEBUG_PRINTLN(fileName);
@@ -1683,6 +1867,7 @@ bool WS2812FX::deserializeMap(uint8_t n) {
     if (!map.isNull() && map.size()) {  // not an empty map
       customMappingSize = min((unsigned)map.size(), (unsigned)getLengthTotal());
       for (unsigned i=0; i<customMappingSize; i++) customMappingTable[i] = (uint16_t) (map[i]<0 ? 0xFFFFU : map[i]);
+      currentLedmap = n;
     }
   } else {
     DEBUG_PRINTLN(F("ERROR LED map allocation error."));
@@ -1692,7 +1877,7 @@ bool WS2812FX::deserializeMap(uint8_t n) {
   return (customMappingSize > 0);
 }
 
-uint16_t IRAM_ATTR WS2812FX::getMappedPixelIndex(uint16_t index) {
+uint16_t IRAM_ATTR WS2812FX::getMappedPixelIndex(uint16_t index) const {
   // convert logical address to physical
   if (index < customMappingSize
     && (realtimeMode == REALTIME_MODE_INACTIVE || realtimeRespectLedMaps)) index = customMappingTable[index];
